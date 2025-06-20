@@ -1,0 +1,67 @@
+## BASE CONTAINER WITH CUDA
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS cebra-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -y \
+    && apt-get install --no-install-recommends -yy git python3 python3-pip python-is-python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu124
+RUN pip install --upgrade pip
+
+
+## CLONE THE REPO
+FROM ubuntu AS repo
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -y \
+    && apt-get install --no-install-recommends -yy git python3 python3-pip python-is-python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /repo
+COPY . /repo
+RUN git status --porcelain || true
+
+WORKDIR /target
+RUN git clone --filter=tree:0 --depth=1 file:///repo/.git /target
+RUN git log
+
+
+## BUILD CEBRA WHEEL
+FROM python:3.9 AS wheel
+
+RUN pip install --upgrade --no-cache-dir pip
+RUN pip install --upgrade --no-cache-dir build virtualenv
+
+WORKDIR /build
+COPY --from=repo /target .
+RUN make dist
+
+
+## FINAL CEBRA CONTAINER
+FROM cebra-base
+
+ENV WHEEL=cebra-0.6.0a2-py3-none-any.whl
+WORKDIR /build
+COPY --from=wheel /build/dist/${WHEEL} .
+RUN pip install --no-cache-dir ${WHEEL}'[dev,integrations,datasets]'
+RUN rm -rf /build
+
+
+# ADD TRAINING SCRIPT
+WORKDIR /app
+COPY --from=repo /target .
+COPY cebra_train.py /app/cebra_train.py
+ENV PYTHONPATH=/app
+
+# CREATE USER (safe defaults if UID/GID not passed)
+ARG UID=1000
+ARG GID=1000
+RUN groupadd -g $GID appgroup && \
+    useradd -u $UID -g $GID -ms "/bin/bash" appuser && \
+    chown -R appuser:appgroup /app
+USER appuser
+
+# ENTRYPOINT FOR SAGEMAKER
+WORKDIR /app
+ENTRYPOINT ["python", "cebra_train.py"]
